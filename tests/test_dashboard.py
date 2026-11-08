@@ -428,6 +428,15 @@ class TestHTMLTemplate(unittest.TestCase):
         self.assertIn('data-tz="local"', HTML_TEMPLATE)
         self.assertIn('data-tz="utc"', HTML_TEMPLATE)
 
+    def test_hourly_heatmap_view_present(self):
+        """Hourly card has a bars/heatmap view toggle and a heatmap container."""
+        self.assertIn('data-view="bars"', HTML_TEMPLATE)
+        self.assertIn('data-view="heatmap"', HTML_TEMPLATE)
+        self.assertIn('id="heatmap-hourly"', HTML_TEMPLATE)
+        self.assertIn('function aggregateHeatmap(', HTML_TEMPLATE)
+        # TZ toggle must only touch the TZ buttons, not the view buttons that share its styling
+        self.assertIn(".tz-btn[data-tz]", HTML_TEMPLATE)
+
     def test_hourly_peak_hour_constants(self):
         """Peak-hour set covers UTC 12–17 (Mon–Fri 05:00–11:00 PT)."""
         self.assertIn('PEAK_HOURS_UTC', HTML_TEMPLATE)

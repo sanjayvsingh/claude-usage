@@ -345,6 +345,26 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .tz-btn:last-child { border-right: none; }
   .tz-btn:hover { background: var(--raised); color: var(--text); }
   .tz-btn.active { background: var(--selected); color: var(--text); }
+  .tz-btn.view-btn { display: inline-flex; align-items: center; padding: 3px 8px; }
+  .tz-btn.view-btn svg { display: block; }
+  /* Weekday × hour heatmap — alternate view of the hourly card. Plain DOM grid
+     (no Chart.js matrix plugin): a sequential one-hue ramp of the accent over
+     the card surface, 2px surface gaps between cells, peak window outlined. */
+  .heatmap { display: none; flex-direction: column; height: 100%; }
+  .heatmap.visible { display: flex; }
+  .chart-wrap.heatmap-mode > canvas { display: none; }
+  .heatmap-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: 34px repeat(24, minmax(0, 1fr)); grid-template-rows: 16px repeat(7, minmax(0, 1fr)); gap: 2px; }
+  .heatmap-hour, .heatmap-day { font-size: 10px; color: var(--muted); display: flex; align-items: center; justify-content: center; overflow: hidden; white-space: nowrap; }
+  .heatmap-hour.peak { color: var(--red); }
+  .heatmap-day { justify-content: flex-start; font-weight: 600; letter-spacing: 0.03em; }
+  .heatmap-cell { border-radius: 3px; background: var(--selected); cursor: default; }
+  .heatmap-cell.peak { box-shadow: inset 0 0 0 1px rgba(199,78,57,0.55); }
+  .heatmap-cell:hover { box-shadow: inset 0 0 0 1px var(--text); }
+  .heatmap-legend { display: flex; align-items: center; justify-content: flex-end; gap: 8px; font-size: 11px; color: var(--muted); margin-top: 8px; height: 14px; flex-shrink: 0; }
+  .heatmap-ramp { width: 110px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--selected), rgba(217,119,87,0.25) 12%, #d97757); }
+  .heatmap-tip { position: absolute; pointer-events: none; z-index: 20; background: rgba(0,0,0,0.85); color: #fff; font-size: 12px; line-height: 1.5; padding: 6px 10px; border-radius: 4px; white-space: nowrap; display: none; }
+  .heatmap-tip strong { font-weight: 600; }
+  .heatmap-empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; }
   .peak-legend { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
   .peak-swatch { width: 10px; height: 10px; background: var(--red); border-radius: 2px; display: inline-block; }
 
@@ -523,9 +543,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             <button class="tz-btn" data-tz="local" onclick="setHourlyTZ('local')">Local</button>
             <button class="tz-btn" data-tz="utc"   onclick="setHourlyTZ('utc')">UTC</button>
           </div>
+          <div class="tz-group" role="group" aria-label="Chart view">
+            <button class="tz-btn view-btn" data-view="bars" onclick="setHourlyView('bars')" title="Hourly bars" aria-label="Hourly bars"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg></button>
+            <button class="tz-btn view-btn" data-view="heatmap" onclick="setHourlyView('heatmap')" title="Weekday &times; hour heatmap" aria-label="Weekday by hour heatmap"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/><path d="M9 3v18"/><path d="M15 3v18"/></svg></button>
+          </div>
         </div>
       </div>
-      <div class="chart-wrap"><canvas id="chart-hourly"></canvas></div>
+      <div class="chart-wrap" id="hourly-wrap"><canvas id="chart-hourly"></canvas><div class="heatmap" id="heatmap-hourly"></div><div class="heatmap-tip" id="heatmap-tip"></div></div>
     </div>
     <div class="chart-card" id="sec-models" data-card="model-chart">
       <h2><span class="card-caret">&#9656;</span>By Model</h2>
@@ -690,6 +714,13 @@ let projectLimit = TABLE_STEPS[0];
 let branchLimit = TABLE_STEPS[0];
 let dispatchesLimit = TABLE_STEPS[0];
 let hourlyTZ = 'local';  // 'local' or 'utc'
+// Hourly card view: 'bars' (Chart.js bar+line) or 'heatmap' (weekday × hour
+// grid). Persisted like the collapsed-card set — it's a layout preference.
+const HOURLY_VIEW_KEY = 'cu_hourly_view';
+let hourlyView = 'bars';
+try { if (localStorage.getItem(HOURLY_VIEW_KEY) === 'heatmap') hourlyView = 'heatmap'; } catch (e) {}
+const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const WEEKDAY_LONG  = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 // ── Peak-hour config ───────────────────────────────────────────────────────
 // Anthropic throttles Mon–Fri 05:00–11:00 PT. We approximate as fixed UTC hours
@@ -946,9 +977,22 @@ function setRange(range) {
 
 function setHourlyTZ(mode) {
   hourlyTZ = mode;
-  document.querySelectorAll('.tz-btn').forEach(btn =>
+  document.querySelectorAll('.tz-btn[data-tz]').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.tz === mode)
   );
+  applyFilter();
+}
+
+function syncHourlyViewButtons() {
+  document.querySelectorAll('.view-btn').forEach(btn =>
+    btn.classList.toggle('active', btn.dataset.view === hourlyView)
+  );
+}
+
+function setHourlyView(view) {
+  hourlyView = view === 'heatmap' ? 'heatmap' : 'bars';
+  try { localStorage.setItem(HOURLY_VIEW_KEY, hourlyView); } catch (e) {}
+  syncHourlyViewButtons();
   applyFilter();
 }
 
@@ -1294,7 +1338,7 @@ function applyFilter() {
 
   renderStats(totals);
   renderDailyChart(daily);
-  renderHourlyChart(hourlyAgg);
+  renderHourlyChart(hourlyAgg, hourlySrc);
   renderModelChart(byModel);
   renderProjectChart(byProject);
   renderSubagentChart(byAgentType);
@@ -1358,8 +1402,122 @@ function aggregateHourly(rows, tzMode) {
   return { hours, dayCount };
 }
 
-function renderHourlyChart(agg) {
+// Bucket rows into a 7 × 24 weekday × hour grid in the display TZ. Shifting by
+// the local offset can move a turn onto a different calendar day, so the weekday
+// is taken from the shifted timestamp, not from the UTC `day` string. Each cell
+// is averaged over the distinct active dates that fell on its weekday — the same
+// "days with data" denominator the bar view uses, so a Tuesday with no usage
+// doesn't dilute the other Tuesdays.
+function aggregateHeatmap(rows, tzMode) {
+  const shiftMs = tzMode === 'utc' ? 0 : localOffsetHours() * 3600e3;
+  const sums = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => ({ turns: 0, output: 0 })));
+  const datesByDow = Array.from({ length: 7 }, () => new Set());
+  for (const r of rows) {
+    if (!r.day || r.day.length < 10) continue;
+    const y = +r.day.slice(0, 4), m = +r.day.slice(5, 7), d = +r.day.slice(8, 10);
+    const dt = new Date(Date.UTC(y, m - 1, d, r.hour || 0) + shiftMs);
+    if (isNaN(dt)) continue;
+    const dow = dt.getUTCDay(), hour = dt.getUTCHours();
+    sums[dow][hour].turns  += r.turns  || 0;
+    sums[dow][hour].output += r.output || 0;
+    datesByDow[dow].add(dt.toISOString().slice(0, 10));
+  }
+  let maxTurns = 0, dayCount = 0;
+  const grid = sums.map((row, dow) => {
+    const n = datesByDow[dow].size;
+    dayCount += n;
+    return row.map((c, hour) => {
+      const avgTurns = n ? c.turns / n : 0;
+      if (avgTurns > maxTurns) maxTurns = avgTurns;
+      return {
+        dow, hour, avgTurns,
+        avgOutput:  n ? c.output / n : 0,
+        totalTurns: c.turns,
+        days:       n,
+        // Anthropic's peak window is Mon–Fri only; the bar view can't express
+        // the weekday half of that, the grid can.
+        peak:       dow >= 1 && dow <= 5 && isPeakHour(hour, tzMode),
+      };
+    });
+  });
+  return { grid, maxTurns, dayCount };
+}
+
+// Sequential one-hue ramp: accent at increasing alpha over the card surface.
+// t is the cell's share of the max (0–1); null means no usage at all, which
+// gets the neutral "selected" surface so empty cells read as empty, not faint.
+function heatColor(t) {
+  if (t === null) return 'var(--selected)';
+  return 'rgba(217,119,87,' + (0.12 + 0.88 * t).toFixed(3) + ')';
+}
+
+function renderHourlyHeatmap(agg) {
+  const el  = document.getElementById('heatmap-hourly');
+  const tip = document.getElementById('heatmap-tip');
+  tip.style.display = 'none';
+  if (!agg.dayCount) {
+    el.innerHTML = '<div class="heatmap-empty">No data in this range</div>';
+    return;
+  }
+  const tz = tzDisplayName(hourlyTZ);
+  let html = '<div class="heatmap-grid" role="img" aria-label="Average turns per hour by weekday"><div></div>';
+  for (let h = 0; h < 24; h++) {
+    html += '<div class="heatmap-hour' + (isPeakHour(h, hourlyTZ) ? ' peak' : '') + '">' + String(h).padStart(2, '0') + '</div>';
+  }
+  for (const row of agg.grid) {
+    html += '<div class="heatmap-day">' + WEEKDAY_SHORT[row[0].dow] + '</div>';
+    for (const c of row) {
+      const t = agg.maxTurns && c.avgTurns > 0 ? c.avgTurns / agg.maxTurns : null;
+      html += '<div class="heatmap-cell' + (c.peak ? ' peak' : '') + '" data-d="' + c.dow + '" data-h="' + c.hour + '" style="background:' + heatColor(t) + '"></div>';
+    }
+  }
+  html += '</div><div class="heatmap-legend"><span>Avg turns / hour</span><span>0</span><span class="heatmap-ramp"></span><span>' + agg.maxTurns.toFixed(2) + '</span></div>';
+  el.innerHTML = html;
+
+  // One delegated hover handler on the grid instead of 168 per-cell listeners.
+  const grid = el.firstChild;
+  // mouseover too, so the tip appears on the first entry even before the
+  // pointer moves (keyboard-driven or synthetic pointer placement).
+  grid.onmouseover = grid.onmousemove = (e) => {
+    const cell = e.target.closest('.heatmap-cell');
+    if (!cell) { tip.style.display = 'none'; return; }
+    const c = agg.grid[+cell.dataset.d][+cell.dataset.h];
+    tip.innerHTML =
+      '<strong>' + WEEKDAY_SHORT[c.dow] + ' ' + formatHourLabel(c.hour) + ' ' + esc(tz) +
+      (c.peak ? ' · Peak — Anthropic US hours' : '') + '</strong><br>' +
+      'Avg turns: ' + c.avgTurns.toFixed(2) + '<br>' +
+      'Avg output: ' + fmt(c.avgOutput) + '<br>' +
+      'Averaged over ' + c.days + ' ' + WEEKDAY_LONG[c.dow] + (c.days === 1 ? '' : 's');
+    tip.style.display = 'block';
+    const wrap = el.parentElement.getBoundingClientRect();
+    let x = e.clientX - wrap.left + 12, y = e.clientY - wrap.top + 12;
+    if (x + tip.offsetWidth  > wrap.width)  x = e.clientX - wrap.left - tip.offsetWidth  - 12;
+    if (y + tip.offsetHeight > wrap.height) y = e.clientY - wrap.top  - tip.offsetHeight - 12;
+    tip.style.left = x + 'px';
+    tip.style.top  = y + 'px';
+  };
+  grid.onmouseleave = () => { tip.style.display = 'none'; };
+}
+
+function renderHourlyChart(agg, rows) {
   const dayCountEl = document.getElementById('hourly-day-count');
+  const wrap = document.getElementById('hourly-wrap');
+  const heat = document.getElementById('heatmap-hourly');
+
+  if (hourlyView === 'heatmap') {
+    if (charts.hourly) { charts.hourly.destroy(); charts.hourly = null; }
+    wrap.classList.add('heatmap-mode');
+    heat.classList.add('visible');
+    const heatAgg = aggregateHeatmap(rows || [], hourlyTZ);
+    dayCountEl.textContent = heatAgg.dayCount
+      ? heatAgg.dayCount + ' day' + (heatAgg.dayCount === 1 ? '' : 's') + ' averaged · ' + tzDisplayName(hourlyTZ)
+      : 'No data · ' + tzDisplayName(hourlyTZ);
+    renderHourlyHeatmap(heatAgg);
+    return;
+  }
+  wrap.classList.remove('heatmap-mode');
+  heat.classList.remove('visible');
+
   dayCountEl.textContent = agg.dayCount
     ? agg.dayCount + ' day' + (agg.dayCount === 1 ? '' : 's') + ' averaged · ' + tzDisplayName(hourlyTZ)
     : 'No data · ' + tzDisplayName(hourlyTZ);
@@ -1943,9 +2101,10 @@ async function loadData() {
       const rangeSel = document.getElementById('range-select');
       if (rangeSel) rangeSel.value = selectedRange;
       // Mark default TZ button active
-      document.querySelectorAll('.tz-btn').forEach(btn =>
+      document.querySelectorAll('.tz-btn[data-tz]').forEach(btn =>
         btn.classList.toggle('active', btn.dataset.tz === hourlyTZ)
       );
+      syncHourlyViewButtons();
       // Build model filter (reads URL for model selection too)
       buildFilterUI(d.all_models);
       updateSortIcons();
